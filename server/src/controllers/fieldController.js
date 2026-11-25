@@ -1,0 +1,441 @@
+// ==============================================================================
+// EDGEWFORCE - FIELD OPERATIONS & SUPERVISOR CONTROLLER
+// ==============================================================================
+
+import {supervisorScope,supervisorEmployee,supervisorRecord} from '../utils/supervisorAccess.js';
+import { fieldService } from '../services/fieldService.js';
+import { isManagementUser } from '../middleware/rbac.js';
+import {db} from '../config/database.js';
+import { operationalReportService } from '../services/operationalReportService.js';
+
+export const fieldController = {
+  async getRouteManifest(req, res) {
+    try {
+      const agentId = req.user.employee?.id;
+      const manifest = agentId?await fieldService.getRouteManifest(agentId,req.user.company_id):[];
+      res.json({ success: true, data: manifest, manifest });
+    } catch (err) {
+      res.status(500).json({ success: false, error: { message: err.message } });
+    }
+  },
+
+  async toggleShift(req, res) {
+    try {
+      const agentId = req.user.employee?.id || req.user.id;
+      const { latitude, longitude, device } = req.body;
+      const shift = await fieldService.toggleShift(agentId, latitude, longitude, device, req, null, req.body);
+      res.json({ success: true, data: shift, ...shift });
+    } catch (err) {
+      res.status(400).json({ success: false, error: { code: 'SHIFT_TOGGLE_FAILED', message: err.message } });
+    }
+  },
+
+  async getShiftWindowStatus(req, res) {
+    try {
+      const agentId = req.query.employee_id || req.user.employee?.id || null;
+      if (req.query.employee_id && Number(agentId) !== Number(req.user.employee?.id) && !isManagementUser(req.user)) return res.status(403).json({ success: false, error: { message: 'You can only view your own attendance.' } });
+      const companyId = req.user.company_id || 1;
+      const status = await fieldService.getShiftWindowStatus(agentId, companyId);
+      res.json({ success: true, data: status, ...status });
+    } catch (err) {
+      res.status(500).json({ success: false, error: { message: err.message } });
+    }
+  },
+
+  async getGeoLocationReport(req, res) {
+    try {
+      const companyId = req.user.company_id || 1;
+      const {employee_ids:ignored,...filters}=req.query;
+      if(isManagementUser(req.user)){
+        const scope=await supervisorScope(req.user);
+        if(filters.employee_id)await supervisorEmployee(scope,filters.employee_id);
+        if(scope.restricted){
+          const employees=await db.find('employees',{company_id:Number(companyId)});
+          filters.employee_ids=employees.filter(e=>Number(e.id)===scope.supervisorId||Number(e.supervisor_id)===scope.supervisorId).map(e=>Number(e.id));
+        }
+      }else{
+        if(!req.user.employee?.id)return res.status(403).json({success:false,error:{message:'A linked staff profile is required to view location history.'}});
+        filters.employee_id=req.user.employee.id;
+      }
+      const report = await fieldService.getGeoLocationReport(filters, companyId);
+      res.json({ success: true, data: report, report, total: report.length });
+    } catch (err) {
+      res.status(err.status||500).json({ success: false, error: { message: err.message } });
+    }
+  },
+
+  async getCurrentShift(req, res) {
+    try {
+      const agentId = req.user.employee?.id;
+      const shift = agentId?await fieldService.getCurrentShift(agentId,req.user.company_id):null;
+      res.json({ success: true, data: shift, shift });
+    } catch (err) {
+      res.status(500).json({ success: false, error: { message: err.message } });
+    }
+  },
+
+  async getPersonalAlerts(req,res){
+    try{
+      const employeeId=req.user.employee?.id;
+      if(!employeeId)return res.status(403).json({success:false,error:{message:'A linked staff profile is required to view personal field alerts.'}});
+      const alerts=await db.find('location_alerts',{company_id:Number(req.user.company_id),employee_id:Number(employeeId)},{order:{column:'created_at',ascending:false}});
+      res.json({success:true,data:alerts});
+    }catch(error){res.status(500).json({success:false,error:{message:error.message}});}
+  },
+
+  async checkIn(req, res) {
+    try {
+      const employeeId = req.body.employee_id || req.user.employee?.id || req.user.id;
+      const { store_id, latitude, longitude, accuracy, address, device, is_override, override_reason } = req.body;
+      const result = await fieldService.checkIn({
+        employeeId,
+        storeId: store_id,
+        latitude,
+        longitude,
+        accuracy,
+        address,
+        device,
+        isOverride: is_override,
+        overrideReason: override_reason,
+        req
+      });
+      res.json({ success: true, data: result, ...result });
+    } catch (err) {
+      res.status(400).json({ success: false, error: { code: 'CHECKIN_FAILED', message: err.message } });
+    }
+  },
+
+  async checkOut(req, res) {
+    try {
+      const employeeId = req.body.employee_id || req.user.employee?.id || req.user.id;
+      const { latitude, longitude, accuracy, address, device } = req.body;
+      const result = await fieldService.checkOut({
+        employeeId,
+        latitude,
+        longitude,
+        accuracy,
+        address,
+        device,
+        req
+      });
+      res.json({ success: true, data: result, ...result });
+    } catch (err) {
+      res.status(400).json({ success: false, error: { code: 'CHECKOUT_FAILED', message: err.message } });
+    }
+  },
+
+  async recordLocationPing(req, res) {
+    try {
+      const employeeId = req.user.employee?.id || req.user.id;
+      const { latitude, longitude, accuracy, address, current_activity, battery_level } = req.body;
+      const ping = await fieldService.recordLocationPing({
+        employeeId,
+        latitude,
+        longitude,
+        accuracy,
+        address,
+        currentActivity: current_activity,
+        batteryLevel: battery_level,
+        req
+      });
+      res.json({ success: true, data: ping });
+    } catch (err) {
+      res.status(400).json({ success: false, error: { message: err.message } });
+    }
+  },
+
+  async getLocationHistory(req, res) {
+    try {
+      const isMgmt = isManagementUser(req.user);
+      const requestedEmpId = req.params.employeeId;
+      const callerEmpId = req.user.employee?.id || req.user.id;
+
+      if (requestedEmpId && !isMgmt && String(requestedEmpId) !== String(callerEmpId)) {
+        return res.status(403).json({
+          success: false,
+          error: { code: 'FORBIDDEN', message: 'Access denied. You can only view your own location telemetry history.' }
+        });
+      }
+
+      const employeeId = requestedEmpId || callerEmpId;
+      const date = req.query.date;
+      const history = await fieldService.getLocationHistory(employeeId, date);
+      res.json({ success: true, data: history });
+    } catch (err) {
+      res.status(500).json({ success: false, error: { message: err.message } });
+    }
+  },
+
+  async getStores(req, res) {
+    try {
+      const stores = await fieldService.getStores(req.query);
+      res.json({ success: true, data: stores, stores });
+    } catch (err) {
+      res.status(500).json({ success: false, error: { message: err.message } });
+    }
+  },
+
+  async submitStoreRequest(req, res) {
+    try {
+      const employeeId = req.user.employee?.id || req.user.id;
+      const request = await fieldService.submitStoreRequest(req.body, employeeId, req.files || {}, req);
+      res.status(201).json({ success: true, data: request, message: 'New store request submitted for supervisor approval.' });
+    } catch (err) {
+      res.status(400).json({ success: false, error: { code: 'STORE_REQUEST_FAILED', message: err.message } });
+    }
+  },
+
+  async getStoreRequests(req, res) {
+    try {
+      const requests = await fieldService.getStoreRequests(req.query);
+      res.json({ success: true, data: requests, requests });
+    } catch (err) {
+      res.status(500).json({ success: false, error: { message: err.message } });
+    }
+  },
+
+  async approveStoreRequest(req, res) {
+    try {
+      const reviewerId = req.user.employee?.id || req.user.id;
+      const { requestId } = req.params;
+      const result = await fieldService.approveStoreRequest(requestId, req.body, reviewerId, req);
+      res.json({ success: true, data: result, message: 'Store request approved and converted to active store.' });
+    } catch (err) {
+      res.status(400).json({ success: false, error: { code: 'APPROVE_STORE_FAILED', message: err.message } });
+    }
+  },
+
+  async rejectStoreRequest(req, res) {
+    try {
+      const reviewerId = req.user.employee?.id || req.user.id;
+      const { requestId } = req.params;
+      const { rejection_reason } = req.body;
+      const result = await fieldService.rejectStoreRequest(requestId, rejection_reason, reviewerId, req);
+      res.json({ success: true, data: result, message: 'Store request marked as rejected.' });
+    } catch (err) {
+      res.status(400).json({ success: false, error: { code: 'REJECT_STORE_FAILED', message: err.message } });
+    }
+  },
+
+  async startStoreVisit(req, res) {
+    try {
+      const agentId = req.user.employee?.id || req.user.id;
+      const { store_id, latitude, longitude, visit_purpose, notes } = req.body;
+      const visit = await fieldService.startStoreVisit({
+        storeId: store_id,
+        agentId,
+        latitude,
+        longitude,
+        visitPurpose: visit_purpose,
+        notes,
+        req
+      });
+      res.json({ success: true, data: visit, message: 'Store visit started with geofence verification.' });
+    } catch (err) {
+      res.status(400).json({ success: false, error: { code: 'START_VISIT_FAILED', message: err.message } });
+    }
+  },
+
+  async logFieldActivity(req, res) {
+    try {
+      const employeeId = req.user.employee?.id || req.user.id;
+      const file = req.file || (req.files?.photo ? req.files.photo[0] : null);
+      const activity = await fieldService.logFieldActivity(req.body, employeeId, file, req);
+      res.status(201).json({ success: true, data: activity, message: 'Field activity logged successfully.' });
+    } catch (err) {
+      res.status(400).json({ success: false, error: { code: 'FIELD_ACTIVITY_FAILED', message: err.message } });
+    }
+  },
+
+  async logSalesActivity(req, res) {
+    try {
+      const employeeId = req.user.employee?.id || req.user.id;
+      const file = req.file || (req.files?.photo ? req.files.photo[0] : null);
+      const activity = await fieldService.logSalesActivity(req.body, employeeId, file, req);
+      res.status(201).json({ success: true, data: activity, message: 'Sales activity logged successfully.' });
+    } catch (err) {
+      res.status(400).json({ success: false, error: { code: 'SALES_ACTIVITY_FAILED', message: err.message } });
+    }
+  },
+
+  async checkInVisit(req, res) {
+    try {
+      const agentId = req.user.employee?.id || req.user.id;
+      const { visit_id, latitude, longitude } = req.body;
+      const visit = await fieldService.checkInVisit(visit_id, agentId, latitude, longitude, req);
+      res.json({ success: true, data: visit, ...visit, message: 'Geofence verified and visit check-in recorded.' });
+    } catch (err) {
+      res.status(400).json({ success: false, error: { code: 'GEOFENCE_FAILED', message: err.message } });
+    }
+  },
+
+  async completeVisit(req, res) {
+    try {
+      const agentId = req.user.employee?.id || req.user.id;
+      const { visit_id } = req.body;
+      const visit = await fieldService.completeVisit(visit_id, agentId, req.body, req.files || {}, req);
+      res.json({ success: true, data: visit, ...visit, message: 'Visit completed and store audit verified.' });
+    } catch (err) {
+      res.status(400).json({ success: false, error: { code: 'VISIT_COMPLETION_FAILED', message: err.message } });
+    }
+  },
+
+  async triggerSOS(req, res) {
+    try {
+      const agentId = req.user.employee?.id;
+      if (!agentId) throw new Error('A linked active staff profile is required to send an SOS.');
+      const { latitude, longitude, accuracy, message } = req.body;
+      const sos = await fieldService.triggerSOS(agentId, latitude, longitude, accuracy, message, req);
+      res.status(201).json({ success: true, data: sos, ...sos, message: 'Emergency recorded. Operations and HR can view it in the emergency dashboard.' });
+    } catch (err) {
+      res.status(400).json({ success: false, error: { code: 'SOS_TRIGGER_FAILED', message: err.message } });
+    }
+  },
+
+  async getSOS(req, res) {
+    try {
+      const isMgmt = isManagementUser(req.user);
+      const list = await fieldService.getSOS(req.query.status, req.user.company_id);
+      if (!isMgmt) {
+        const callerEmpId = req.user.employee?.id || req.user.id;
+        const filtered = list.filter(item => String(item.agent_id || item.employee_id) === String(callerEmpId));
+        return res.json({ success: true, data: filtered, list: filtered });
+      }
+      res.json({ success: true, data: list, list });
+    } catch (err) {
+      res.status(500).json({ success: false, error: { message: err.message } });
+    }
+  },
+
+  async getSupervisorDashboardMetrics(req, res) {
+    try {
+      const scope=await supervisorScope(req.user,req.query.supervisor_id);
+      const supervisorId=scope.supervisorId;
+      const metrics = await fieldService.getSupervisorDashboardMetrics(supervisorId, req.query.date, scope.companyId);
+      res.json({ success: true, data: metrics });
+    } catch (err) {
+      res.status(err.status||500).json({ success: false, error: { message: err.message } });
+    }
+  },
+
+  async getSupervisorTeamTable(req, res) {
+    try {
+      const scope=await supervisorScope(req.user,req.query.supervisor_id);
+      const supervisorId=scope.supervisorId;
+      const team = await fieldService.getSupervisorTeamTable({ ...req.query, supervisor_id: supervisorId, company_id: scope.companyId });
+      res.json({ success: true, data: team, team });
+    } catch (err) {
+      res.status(err.status||500).json({ success: false, error: { message: err.message } });
+    }
+  },
+
+  async getSupervisorEmployeeProfile(req, res) {
+    try {
+      const { employeeId } = req.params;
+      const scope=await supervisorScope(req.user);
+      await supervisorEmployee(scope,employeeId);
+      const profile = await fieldService.getSupervisorEmployeeProfile(employeeId, req.query.date, scope.companyId);
+      res.json({ success: true, data: profile });
+    } catch (err) {
+      res.status(err.status||500).json({ success: false, error: { message: err.message } });
+    }
+  },
+
+  async getEmployeeTimeline(req, res) {
+    try {
+      const { employeeId } = req.params;
+      const scope=await supervisorScope(req.user);
+      await supervisorEmployee(scope,employeeId);
+      const timeline = await fieldService.getEmployeeTimeline(employeeId, req.query.date, scope.companyId);
+      res.json({ success: true, data: timeline });
+    } catch (err) {
+      res.status(err.status||500).json({ success: false, error: { message: err.message } });
+    }
+  },
+
+  async getSupervisorAlerts(req, res) {
+    try {
+      const scope=await supervisorScope(req.user,req.query.supervisor_id);
+      const supervisorId=scope.supervisorId;
+      const alerts = await fieldService.getSupervisorAlerts({ ...req.query, supervisor_id: supervisorId, company_id: scope.companyId });
+      res.json({ success: true, data: alerts, alerts });
+    } catch (err) {
+      res.status(err.status||500).json({ success: false, error: { message: err.message } });
+    }
+  },
+
+  async resolveSupervisorAlert(req, res) {
+    try {
+      const actorId = req.user.employee?.id || req.user.id;
+      const { alertId } = req.params;
+      const scope=await supervisorScope(req.user);
+      await supervisorRecord(scope,'location_alerts',alertId);
+      const { resolution_notes } = req.body;
+      const updated = await fieldService.resolveSupervisorAlert(alertId, resolution_notes, actorId, req);
+      res.json({ success: true, data: updated, message: 'Alert resolved successfully.' });
+    } catch (err) {
+      res.status(err.status||400).json({ success: false, error: { message: err.message } });
+    }
+  },
+
+  async overrideAttendance(req, res) {
+    try {
+      const reviewerId = req.user.employee?.id || req.user.id;
+      const { attendance_id, action, clock_out_time, notes } = req.body;
+      const scope=await supervisorScope(req.user);
+      await supervisorRecord(scope,'attendance',attendance_id);
+      const updated = await fieldService.overrideAttendance({
+        attendanceId: attendance_id,
+        action,
+        clockOutTime: clock_out_time,
+        notes,
+        reviewerId,
+        req
+      });
+      res.json({ success: true, data: updated, message: 'Attendance record updated via supervisor approval.' });
+    } catch (err) {
+      res.status(err.status||400).json({ success: false, error: { message: err.message } });
+    }
+  },
+
+  async generateDailyTeamSummary(req, res) {
+    try {
+      const scope=await supervisorScope(req.user,req.body?.supervisor_id);
+      const supervisorId=scope.supervisorId;
+      const summary = await fieldService.generateDailyTeamSummary(supervisorId, req.body?.date, scope.companyId);
+      res.json({ success: true, data: summary, message: 'Daily team summary compiled successfully.' });
+    } catch (err) {
+      res.status(err.status||500).json({ success: false, error: { message: err.message } });
+    }
+  },
+
+  async getReports(req, res) {
+    try {
+      let scope,employeeId;
+      if(isManagementUser(req.user)){
+        scope=await supervisorScope(req.user,req.query.supervisorId||req.query.supervisor_id);
+        employeeId=req.query.employeeId||req.query.employee_id;
+        if(employeeId)await supervisorEmployee(scope,employeeId);
+      }else{
+        employeeId=req.user.employee?.id;
+        if(!employeeId)throw Object.assign(new Error('A linked staff profile is required.'),{status:403});
+        scope={companyId:Number(req.user.company_id),supervisorId:null};
+      }
+      if(req.query.reportType==='overview'){
+        if(!isManagementUser(req.user))throw Object.assign(new Error('Management report access is required.'),{status:403});
+        const bundle=await operationalReportService.overview({companyId:scope.companyId,supervisorId:scope.supervisorId,employeeId,dateFrom:req.query.dateFrom,dateTo:req.query.dateTo});
+        res.set('Cache-Control','private, no-store');
+        if(req.query.format==='xlsx'){
+          const reportId=String(req.query.selected||'daily_ops');
+          const bytes=await operationalReportService.workbook(bundle,reportId);
+          return res.set('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet').set('Content-Disposition',`attachment; filename="EdgeWForce-${reportId}-${bundle.date_from}-${bundle.date_to}.xlsx"`).send(bytes);
+        }
+        return res.json({success:true,data:bundle});
+      }
+      const reports = await fieldService.getReports({...req.query,companyId:scope.companyId,supervisorId:scope.supervisorId,employeeId});
+      res.json({ success: true, data: reports, reports });
+    } catch (err) {
+      res.status(err.status||500).json({ success: false, error: { message: err.message } });
+    }
+  }
+};

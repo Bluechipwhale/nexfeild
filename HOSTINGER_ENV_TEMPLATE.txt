@@ -1,0 +1,29 @@
+VITE_APP_MODE=production
+NODE_ENV=production
+PORT=3000
+
+# Hostinger MySQL database
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=
+DB_PASSWORD=
+DB_NAME=
+REQUIRE_MYSQL_DATABASE=true
+
+CORS_ORIGIN=https://mediumspringgreen-bison-390693.hostingersite.com
+VITE_API_BASE_URL=https://mediumspringgreen-bison-390693.hostingersite.com
+
+JWT_SECRET=generate_a_unique_64_byte_secret_here
+DB_SEED_ON_START=true
+BOOTSTRAP_ADMIN_EMAIL=admin@nexfieldforce.com
+BOOTSTRAP_ADMIN_PASSWORD=generate_a_unique_14_character_or_longer_password
+UPLOAD_DIR=uploads
+
+RESEND_API_KEY=
+EMAIL_FROM=NexFieldForce <onboarding@resend.dev>
+
+VITE_MAPBOX_ACCESS_TOKEN=
+VITE_ENABLE_OPENAI=false
+VITE_OPENAI_API_BASE=https://api.openai.com/v1
+VITE_OPENAI_API_KEY=
+VITE_OPENAI_MODEL=gpt-4.1-mini
